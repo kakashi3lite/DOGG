@@ -1,0 +1,652 @@
+openapi: 3.0.0
+info:
+  title: DoggieGrowl API
+  version: 1.0.0
+  description: API for the DoggieGrowl application
+
+servers:
+  - url: http://localhost:3001/api
+    description: Local Development Server
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    User:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        email:
+          type: string
+          format: email
+        avatarUrl:
+          type: string
+          format: url
+      required:
+        - username
+        - email
+    NewUser:
+      type: object
+      properties:
+        username:
+          type: string
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+      required:
+        - username
+        - email
+        - password
+    LoginUser:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+      required:
+        - email
+        - password
+    Dog:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        breed:
+          type: string
+        age:
+          type: integer
+        owner:
+          type: string
+          format: uuid
+        avatarUrl:
+          type: string
+          format: url
+      required:
+        - name
+        - breed
+        - age
+        - owner
+    Lesson:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        slug:
+          type: string
+        description:
+          type: string
+        videoUrl:
+          type: string
+          format: url
+        xp:
+          type: integer
+      required:
+        - title
+        - slug
+        - description
+        - videoUrl
+        - xp
+    Progress:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        user:
+          type: string
+          format: uuid
+        lesson:
+          type: string
+          format: uuid
+        completed:
+          type: boolean
+        xpEarned:
+          type: integer
+      required:
+        - user
+        - lesson
+        - completed
+        - xpEarned
+    Achievement:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        badgeUrl:
+          type: string
+          format: url
+        xp:
+          type: integer
+      required:
+        - name
+        - description
+        - badgeUrl
+        - xp
+    HealthRecord:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        dog:
+          type: string
+          format: uuid
+        recordType:
+          type: string
+          enum: [vaccination, medication, checkup]
+        notes:
+          type: string
+        date:
+          type: string
+          format: date
+      required:
+        - dog
+        - recordType
+        - notes
+        - date
+    Post:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        content:
+          type: string
+        author:
+          type: string
+          format: uuid
+      required:
+        - title
+        - content
+        - author
+    Comment:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        content:
+          type: string
+        author:
+          type: string
+          format: uuid
+        post:
+          type: string
+          format: uuid
+      required:
+        - content
+        - author
+        - post
+    Relationship:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        follower:
+          type: string
+          format: uuid
+        following:
+          type: string
+          format: uuid
+      required:
+        - follower
+        - following
+    Message:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        room:
+          type: string
+          format: uuid
+        sender:
+          type: string
+          format: uuid
+        content:
+          type: string
+        readBy:
+          type: array
+          items:
+            type: string
+            format: uuid
+      required:
+        - room
+        - sender
+        - content
+    Room:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        isGroup:
+          type: boolean
+        participants:
+          type: array
+          items:
+            type: string
+            format: uuid
+        lastMessage:
+          type: string
+          format: uuid
+      required:
+        - participants
+    LeaderboardSnapshot:
+      type: object
+      properties:
+        _id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [daily, weekly, monthly, all-time]
+        entries:
+          type: array
+          items:
+            type: object
+            properties:
+              user:
+                type: string
+                format: uuid
+              xp:
+                type: integer
+              rank:
+                type: integer
+            required:
+              - user
+              - xp
+              - rank
+      required:
+        - type
+        - entries
+
+paths:
+  /auth/register:
+    post:
+      summary: Register a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewUser'
+      responses:
+        '201':
+          description: User registered successfully
+  /auth/login:
+    post:
+      summary: Log in a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginUser'
+      responses:
+        '200':
+          description: User logged in successfully
+  /auth/refresh:
+    post:
+      summary: Refresh access token
+      responses:
+        '200':
+          description: Token refreshed successfully
+  /auth/logout:
+    post:
+      summary: Log out a user
+      responses:
+        '200':
+          description: User logged out successfully
+  /users/{id}:
+    get:
+      summary: Get user by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+          description: User ID
+      responses:
+        '200':
+          description: User data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+    put:
+      summary: Update user by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+          description: User ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/User'
+      responses:
+        '200':
+          description: User updated successfully
+  /dogs:
+    post:
+      summary: Create a new dog
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Dog'
+      responses:
+        '201':
+          description: Dog created successfully
+  /dogs/{id}:
+    get:
+      summary: Get dog by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+          description: Dog ID
+      responses:
+        '200':
+          description: Dog data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dog'
+    put:
+      summary: Update dog by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+          description: Dog ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Dog'
+      responses:
+        '200':
+          description: Dog updated successfully
+    delete:
+      summary: Delete dog by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+          description: Dog ID
+      responses:
+        '200':
+          description: Dog deleted successfully
+  /lessons:
+    get:
+      summary: Get all lessons
+      responses:
+        '200':
+          description: List of lessons
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Lesson'
+  /lessons/{slug}:
+    get:
+      summary: Get lesson by slug
+      parameters:
+        - in: path
+          name: slug
+          schema:
+            type: string
+          required: true
+          description: Lesson slug
+      responses:
+        '200':
+          description: Lesson data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lesson'
+  /progress:
+    post:
+      summary: Upsert user progress for a lesson
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Progress'
+      responses:
+        '201':
+          description: Progress updated successfully
+  /achievements:
+    get:
+      summary: Get all achievements
+      responses:
+        '200':
+          description: List of achievements
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Achievement'
+  /health:
+    post:
+      summary: Create a new health record for a dog
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HealthRecord'
+      responses:
+        '201':
+          description: Health record created successfully
+  /health/{dogId}:
+    get:
+      summary: Get health records for a specific dog
+      parameters:
+        - in: path
+          name: dogId
+          schema:
+            type: string
+            format: uuid
+          required: true
+          description: Dog ID
+      responses:
+        '200':
+          description: List of health records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/HealthRecord'
+  /forum:
+    get:
+      summary: Get all forum posts
+      responses:
+        '200':
+          description: List of forum posts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Post'
+    post:
+      summary: Create a new forum post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Post'
+      responses:
+        '201':
+          description: Post created successfully
+  /forum/{id}:
+    get:
+      summary: Get forum post by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+          description: Post ID
+      responses:
+        '200':
+          description: Post data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Post'
+    put:
+      summary: Update forum post by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+          description: Post ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Post'
+      responses:
+        '200':
+          description: Post updated successfully
+    delete:
+      summary: Delete forum post by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+          description: Post ID
+      responses:
+        '200':
+          description: Post deleted successfully
+  /forum/{id}/comments:
+    post:
+      summary: Add a comment to a forum post
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+          description: Post ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Comment'
+      responses:
+        '201':
+          description: Comment added successfully
+  /relationships/follow:
+    post:
+      summary: Follow a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                followingId:
+                  type: string
+                  format: uuid
+              required:
+                - followingId
+      responses:
+        '200':
+          description: User followed successfully
+  /relationships/unfollow:
+    post:
+      summary: Unfollow a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                followingId:
+                  type: string
+                  format: uuid
+              required:
+                - followingId
+      responses:
+        '200':
+          description: User unfollowed successfully
+  /leaderboards:
+    get:
+      summary: Get leaderboard data
+      responses:
+        '200':
+          description: Leaderboard data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LeaderboardSnapshot'
