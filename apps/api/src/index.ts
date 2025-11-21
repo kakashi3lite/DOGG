@@ -13,6 +13,7 @@ import {
   securityErrorHandler,
   securityLogger,
 } from "./middleware/security";
+import { setupSwagger } from "./config/swagger";
 import authRouter from "./routes/auth";
 import usersRoutes from "./routes/users";
 import dogsRoutes from "./routes/dogs";
@@ -79,6 +80,8 @@ app.get("/api/security/status", (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+setupSwagger(app);
 
 app.use("/api/auth", authRouter);
 app.use("/api/users", usersRoutes);
