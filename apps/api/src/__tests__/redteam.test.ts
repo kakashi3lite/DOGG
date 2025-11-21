@@ -1,1 +1,418 @@
-import request from 'supertest';\nimport express from 'express';\nimport { UserModel } from '../models/user';\nimport authRouter from '../routes/auth';\nimport { hashPassword } from '../middleware/security';\nimport jwt from 'jsonwebtoken';\n\n// Create test app\nconst app = express();\napp.use(express.json());\napp.use('/api/auth', authRouter);\n\ndescribe('Red Team Security Tests', () => {\n  beforeEach(async () => {\n    await UserModel.deleteMany({});\n  });\n\n  describe('SQL Injection Attempts', () => {\n    it('should prevent SQL injection in email field', async () => {\n      const sqlInjectionPayloads = [\n        \"'; DROP TABLE users; --\",\n        \"' OR '1'='1\",\n        \"admin@test.com'; DELETE FROM users WHERE '1'='1\",\n        \"test@example.com' UNION SELECT * FROM users--\"\n      ];\n\n      for (const payload of sqlInjectionPayloads) {\n        const response = await request(app)\n          .post('/api/auth/login')\n          .send({\n            email: payload,\n            password: 'password123'\n          });\n\n        // Should either return validation error or invalid credentials\n        expect([400, 401]).toContain(response.status);\n        expect(response.body).not.toHaveProperty('users');\n        expect(response.body).not.toHaveProperty('token');\n      }\n    });\n\n    it('should prevent NoSQL injection in MongoDB queries', async () => {\n      const noSQLInjectionPayloads = [\n        { $ne: null },\n        { $gt: '' },\n        { $regex: '.*' },\n        { $where: 'return true' }\n      ];\n\n      for (const payload of noSQLInjectionPayloads) {\n        const response = await request(app)\n          .post('/api/auth/login')\n          .send({\n            email: payload,\n            password: 'password123'\n          });\n\n        expect([400, 401]).toContain(response.status);\n      }\n    });\n  });\n\n  describe('XSS (Cross-Site Scripting) Prevention', () => {\n    it('should sanitize script tags in input fields', async () => {\n      const xssPayloads = [\n        '<script>alert(\"XSS\")</script>',\n        '<img src=x onerror=alert(\"XSS\")>',\n        'javascript:alert(\"XSS\")',\n        '<svg/onload=alert(\"XSS\")>',\n        '\"><script>alert(\"XSS\")</script>'\n      ];\n\n      for (const payload of xssPayloads) {\n        const response = await request(app)\n          .post('/api/auth/register')\n          .send({\n            username: payload,\n            email: 'test@example.com',\n            password: 'SecurePass123!'\n          });\n\n        // Should be rejected due to validation\n        expect(response.status).toBe(400);\n        expect(response.body).toHaveProperty('error');\n      }\n    });\n\n    it('should handle XSS in email fields', async () => {\n      const xssEmailPayloads = [\n        'test+<script>alert(\"XSS\")</script>@example.com',\n        '<script>alert(\"XSS\")</script>@example.com',\n        'test@<script>alert(\"XSS\")</script>.com'\n      ];\n\n      for (const payload of xssEmailPayloads) {\n        const response = await request(app)\n          .post('/api/auth/register')\n          .send({\n            username: 'testuser123',\n            email: payload,\n            password: 'SecurePass123!'\n          });\n\n        expect(response.status).toBe(400);\n      }\n    });\n  });\n\n  describe('Authentication Bypass Attempts', () => {\n    it('should prevent JWT token manipulation', async () => {\n      // Create a valid user\n      const user = await UserModel.create({\n        username: 'testuser',\n        email: 'test@example.com',\n        password: await hashPassword('SecurePass123!')\n      });\n\n      // Create a valid token\n      const validToken = jwt.sign(\n        { id: user._id, username: user.username, email: user.email },\n        process.env.JWT_SECRET!,\n        { expiresIn: '1h' }\n      );\n\n      // Attempt token manipulation\n      const manipulatedTokens = [\n        validToken.slice(0, -5) + 'XXXXX', // Modify signature\n        validToken.replace(/\\./g, 'X'), // Replace dots\n        'Bearer invalid-token',\n        '',\n        'null',\n        'undefined'\n      ];\n\n      for (const token of manipulatedTokens) {\n        const response = await request(app)\n          .get('/api/auth/me')\n          .set('Authorization', `Bearer ${token}`);\n\n        expect([401, 403]).toContain(response.status);\n        expect(response.body).not.toHaveProperty('user');\n      }\n    });\n\n    it('should prevent privilege escalation via token payload manipulation', async () => {\n      // Try to create a token with admin privileges\n      const maliciousPayload = {\n        id: 'admin',\n        username: 'admin',\n        email: 'admin@example.com',\n        role: 'admin',\n        isAdmin: true\n      };\n\n      // This should fail without the correct secret\n      try {\n        const maliciousToken = jwt.sign(maliciousPayload, 'wrong-secret');\n        \n        const response = await request(app)\n          .get('/api/auth/me')\n          .set('Authorization', `Bearer ${maliciousToken}`);\n\n        expect([401, 403]).toContain(response.status);\n      } catch (error) {\n        // Expected - should fail to create or verify token\n        expect(error).toBeDefined();\n      }\n    });\n  });\n\n  describe('Rate Limiting Bypass Attempts', () => {\n    it('should prevent rate limit bypass with different IPs', async () => {\n      // Simulate requests from different IPs (limited by test environment)\n      const requests = [];\n      \n      for (let i = 0; i < 10; i++) {\n        const request_promise = request(app)\n          .post('/api/auth/login')\n          .set('X-Forwarded-For', `192.168.1.${i}`)\n          .send({\n            email: 'test@example.com',\n            password: 'wrongpassword'\n          });\n        requests.push(request_promise);\n      }\n\n      const responses = await Promise.all(requests);\n      \n      // Should still get rate limited\n      const rateLimited = responses.filter(r => r.status === 429);\n      expect(rateLimited.length).toBeGreaterThan(0);\n    }, 15000);\n\n    it('should prevent rate limit bypass with different User-Agents', async () => {\n      const userAgents = [\n        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',\n        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',\n        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',\n        'curl/7.68.0',\n        'PostmanRuntime/7.28.0'\n      ];\n\n      const requests = [];\n      \n      for (const userAgent of userAgents) {\n        const request_promise = request(app)\n          .post('/api/auth/login')\n          .set('User-Agent', userAgent)\n          .send({\n            email: 'test@example.com',\n            password: 'wrongpassword'\n          });\n        requests.push(request_promise);\n      }\n\n      const responses = await Promise.all(requests);\n      \n      // Should still get rate limited regardless of User-Agent\n      const rateLimited = responses.filter(r => r.status === 429);\n      expect(rateLimited.length).toBeGreaterThan(0);\n    }, 10000);\n  });\n\n  describe('Input Fuzzing Tests', () => {\n    it('should handle extremely long inputs gracefully', async () => {\n      const longString = 'A'.repeat(10000);\n      \n      const response = await request(app)\n        .post('/api/auth/register')\n        .send({\n          username: longString,\n          email: longString + '@example.com',\n          password: longString\n        });\n\n      // Should handle gracefully without crashing\n      expect([400, 413]).toContain(response.status);\n    });\n\n    it('should handle special characters and unicode', async () => {\n      const specialInputs = [\n        '\\x00\\x01\\x02\\x03', // Null bytes and control characters\n        '🚀🐕💻🔒', // Emojis\n        'test\\x0Auser', // Newline injection\n        'test\\ruser', // Carriage return\n        'test\\tuser', // Tab\n        '../../etc/passwd', // Path traversal\n        '%00%01%02%03', // URL encoded null bytes\n        '${7*7}', // Template injection\n        '{{7*7}}' // Template injection (different syntax)\n      ];\n\n      for (const input of specialInputs) {\n        const response = await request(app)\n          .post('/api/auth/register')\n          .send({\n            username: input,\n            email: 'test@example.com',\n            password: 'SecurePass123!'\n          });\n\n        // Should handle without crashing\n        expect([200, 201, 400]).toContain(response.status);\n      }\n    });\n\n    it('should handle malformed JSON payloads', async () => {\n      const malformedPayloads = [\n        '{\"username\":\"test\",}', // Trailing comma\n        '{username:\"test\"}', // Unquoted key\n        '{\"username\":\"test\"\"email\":\"test@example.com\"}', // Missing comma\n        '[{\"username\":\"test\"}]', // Array instead of object\n        'not-json-at-all',\n        '\\x00\\x01\\x02'\n      ];\n\n      for (const payload of malformedPayloads) {\n        const response = await request(app)\n          .post('/api/auth/register')\n          .set('Content-Type', 'application/json')\n          .send(payload);\n\n        // Should handle malformed JSON gracefully\n        expect([400, 422]).toContain(response.status);\n      }\n    });\n  });\n\n  describe('HTTP Method Override Attacks', () => {\n    it('should not allow method override via headers', async () => {\n      // Try to override POST to DELETE via headers\n      const response = await request(app)\n        .post('/api/auth/register')\n        .set('X-HTTP-Method-Override', 'DELETE')\n        .send({\n          username: 'testuser',\n          email: 'test@example.com',\n          password: 'SecurePass123!'\n        });\n\n      // Should still be treated as POST\n      expect([200, 201, 400]).toContain(response.status);\n    });\n  });\n\n  describe('Timing Attack Prevention', () => {\n    it('should have consistent response times for invalid users', async () => {\n      // Create a real user for comparison\n      await UserModel.create({\n        username: 'realuser',\n        email: 'real@example.com',\n        password: await hashPassword('SecurePass123!')\n      });\n\n      const timings: number[] = [];\n\n      // Test with existing user (wrong password)\n      const start1 = Date.now();\n      await request(app)\n        .post('/api/auth/login')\n        .send({\n          email: 'real@example.com',\n          password: 'wrongpassword'\n        });\n      timings.push(Date.now() - start1);\n\n      // Test with non-existing user\n      const start2 = Date.now();\n      await request(app)\n        .post('/api/auth/login')\n        .send({\n          email: 'nonexistent@example.com',\n          password: 'wrongpassword'\n        });\n      timings.push(Date.now() - start2);\n\n      // Timing difference should be minimal (within reasonable bounds)\n      const timingDifference = Math.abs(timings[0] - timings[1]);\n      expect(timingDifference).toBeLessThan(1000); // Less than 1 second difference\n    });\n  });\n\n  describe('Header Injection Tests', () => {\n    it('should prevent CRLF injection in headers', async () => {\n      const crlfPayloads = [\n        'test\\r\\nX-Injected: true',\n        'test\\nX-Injected: true',\n        'test\\r\\n\\r\\n<script>alert(\"XSS\")</script>'\n      ];\n\n      for (const payload of crlfPayloads) {\n        const response = await request(app)\n          .post('/api/auth/login')\n          .set('User-Agent', payload)\n          .send({\n            email: 'test@example.com',\n            password: 'password'\n          });\n\n        // Should not contain injected headers\n        expect(response.headers).not.toHaveProperty('x-injected');\n      }\n    });\n  });\n\n  describe('Business Logic Tests', () => {\n    it('should not allow registration with existing email in different case', async () => {\n      // Register with lowercase email\n      await request(app)\n        .post('/api/auth/register')\n        .send({\n          username: 'testuser1',\n          email: 'test@example.com',\n          password: 'SecurePass123!'\n        });\n\n      // Try to register with uppercase email\n      const response = await request(app)\n        .post('/api/auth/register')\n        .send({\n          username: 'testuser2',\n          email: 'TEST@EXAMPLE.COM',\n          password: 'SecurePass123!'\n        });\n\n      expect(response.status).toBe(400);\n    });\n\n    it('should not allow empty or whitespace-only passwords', async () => {\n      const invalidPasswords = [\n        '',\n        ' ',\n        '\\t',\n        '\\n',\n        '        ', // Multiple spaces\n        '\\t\\n\\r ' // Mixed whitespace\n      ];\n\n      for (const password of invalidPasswords) {\n        const response = await request(app)\n          .post('/api/auth/register')\n          .send({\n            username: 'testuser',\n            email: 'test@example.com',\n            password: password\n          });\n\n        expect(response.status).toBe(400);\n      }\n    });\n  });\n});
+import request from 'supertest';
+import express from 'express';
+import { UserModel } from '../models/user';
+import authRouter from '../routes/auth';
+import { hashPassword } from '../middleware/security';
+import jwt from 'jsonwebtoken';
+
+// Create test app
+const app = express();
+app.use(express.json());
+app.use('/api/auth', authRouter);
+
+describe('Red Team Security Tests', () => {
+  beforeEach(async () => {
+    await UserModel.deleteMany({});
+  });
+
+  describe('SQL Injection Attempts', () => {
+    it('should prevent SQL injection in email field', async () => {
+      const sqlInjectionPayloads = [
+        "'; DROP TABLE users; --",
+        "' OR '1'='1",
+        "admin@test.com'; DELETE FROM users WHERE '1'='1",
+        "test@example.com' UNION SELECT * FROM users--"
+      ];
+
+      for (const payload of sqlInjectionPayloads) {
+        const response = await request(app)
+          .post('/api/auth/login')
+          .send({
+            email: payload,
+            password: 'password123'
+          });
+
+        // Should either return validation error or invalid credentials
+        expect([400, 401]).toContain(response.status);
+        expect(response.body).not.toHaveProperty('users');
+        expect(response.body).not.toHaveProperty('token');
+      }
+    });
+
+    it('should prevent NoSQL injection in MongoDB queries', async () => {
+      const noSQLInjectionPayloads = [
+        { $ne: null },
+        { $gt: '' },
+        { $regex: '.*' },
+        { $where: 'return true' }
+      ];
+
+      for (const payload of noSQLInjectionPayloads) {
+        const response = await request(app)
+          .post('/api/auth/login')
+          .send({
+            email: payload,
+            password: 'password123'
+          });
+
+        expect([400, 401]).toContain(response.status);
+      }
+    });
+  });
+
+  describe('XSS (Cross-Site Scripting) Prevention', () => {
+    it('should sanitize script tags in input fields', async () => {
+      const xssPayloads = [
+        '<script>alert("XSS")</script>',
+        '<img src=x onerror=alert("XSS")>',
+        'javascript:alert("XSS")',
+        '<svg/onload=alert("XSS")>',
+        '"><script>alert("XSS")</script>'
+      ];
+
+      for (const payload of xssPayloads) {
+        const response = await request(app)
+          .post('/api/auth/register')
+          .send({
+            username: payload,
+            email: 'test@example.com',
+            password: 'SecurePass123!'
+          });
+
+        // Should be rejected due to validation
+        expect(response.status).toBe(400);
+        expect(response.body).toHaveProperty('error');
+      }
+    });
+
+    it('should handle XSS in email fields', async () => {
+      const xssEmailPayloads = [
+        'test+<script>alert("XSS")</script>@example.com',
+        '<script>alert("XSS")</script>@example.com',
+        'test@<script>alert("XSS")</script>.com'
+      ];
+
+      for (const payload of xssEmailPayloads) {
+        const response = await request(app)
+          .post('/api/auth/register')
+          .send({
+            username: 'testuser123',
+            email: payload,
+            password: 'SecurePass123!'
+          });
+
+        expect(response.status).toBe(400);
+      }
+    });
+  });
+
+  describe('Authentication Bypass Attempts', () => {
+    it('should prevent JWT token manipulation', async () => {
+      // Create a valid user
+      const user = await UserModel.create({
+        username: 'testuser',
+        email: 'test@example.com',
+        password: await hashPassword('SecurePass123!')
+      });
+
+      // Create a valid token
+      const validToken = jwt.sign(
+        { id: user._id, username: user.username, email: user.email },
+        process.env.JWT_SECRET!,
+        { expiresIn: '1h' }
+      );
+
+      // Attempt token manipulation
+      const manipulatedTokens = [
+        validToken.slice(0, -5) + 'XXXXX', // Modify signature
+        validToken.replace(/\\./g, 'X'), // Replace dots
+        'Bearer invalid-token',
+        '',
+        'null',
+        'undefined'
+      ];
+
+      for (const token of manipulatedTokens) {
+        const response = await request(app)
+          .get('/api/auth/me')
+          .set('Authorization', `Bearer ${token}`);
+
+        expect([401, 403]).toContain(response.status);
+        expect(response.body).not.toHaveProperty('user');
+      }
+    });
+
+    it('should prevent privilege escalation via token payload manipulation', async () => {
+      // Try to create a token with admin privileges
+      const maliciousPayload = {
+        id: 'admin',
+        username: 'admin',
+        email: 'admin@example.com',
+        role: 'admin',
+        isAdmin: true
+      };
+
+      // This should fail without the correct secret
+      try {
+        const maliciousToken = jwt.sign(maliciousPayload, 'wrong-secret');
+        
+        const response = await request(app)
+          .get('/api/auth/me')
+          .set('Authorization', `Bearer ${maliciousToken}`);
+
+        expect([401, 403]).toContain(response.status);
+      } catch (error) {
+        // Expected - should fail to create or verify token
+        expect(error).toBeDefined();
+      }
+    });
+  });
+
+  describe('Rate Limiting Bypass Attempts', () => {
+    it('should prevent rate limit bypass with different IPs', async () => {
+      // Simulate requests from different IPs (limited by test environment)
+      const requests = [];
+      
+      for (let i = 0; i < 10; i++) {
+        const request_promise = request(app)
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', `192.168.1.${i}`)
+          .send({
+            email: 'test@example.com',
+            password: 'wrongpassword'
+          });
+        requests.push(request_promise);
+      }
+
+      const responses = await Promise.all(requests);
+      
+      // Should still get rate limited
+      const rateLimited = responses.filter(r => r.status === 429);
+      expect(rateLimited.length).toBeGreaterThan(0);
+    }, 15000);
+
+    it('should prevent rate limit bypass with different User-Agents', async () => {
+      const userAgents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+        'curl/7.68.0',
+        'PostmanRuntime/7.28.0'
+      ];
+
+      const requests = [];
+      
+      for (const userAgent of userAgents) {
+        const request_promise = request(app)
+          .post('/api/auth/login')
+          .set('User-Agent', userAgent)
+          .send({
+            email: 'test@example.com',
+            password: 'wrongpassword'
+          });
+        requests.push(request_promise);
+      }
+
+      const responses = await Promise.all(requests);
+      
+      // Should still get rate limited regardless of User-Agent
+      const rateLimited = responses.filter(r => r.status === 429);
+      expect(rateLimited.length).toBeGreaterThan(0);
+    }, 10000);
+  });
+
+  describe('Input Fuzzing Tests', () => {
+    it('should handle extremely long inputs gracefully', async () => {
+      const longString = 'A'.repeat(10000);
+      
+      const response = await request(app)
+        .post('/api/auth/register')
+        .send({
+          username: longString,
+          email: longString + '@example.com',
+          password: longString
+        });
+
+      // Should handle gracefully without crashing
+      expect([400, 413]).toContain(response.status);
+    });
+
+    it('should handle special characters and unicode', async () => {
+      const specialInputs = [
+        '\\x00\\x01\\x02\\x03', // Null bytes and control characters
+        '🚀🐕💻🔒', // Emojis
+        'test\\x0Auser', // Newline injection
+        'test\\ruser', // Carriage return
+        'test\\tuser', // Tab
+        '../../etc/passwd', // Path traversal
+        '%00%01%02%03', // URL encoded null bytes
+        '${7*7}', // Template injection
+        '{{7*7}}' // Template injection (different syntax)
+      ];
+
+      for (const input of specialInputs) {
+        const response = await request(app)
+          .post('/api/auth/register')
+          .send({
+            username: input,
+            email: 'test@example.com',
+            password: 'SecurePass123!'
+          });
+
+        // Should handle without crashing
+        expect([200, 201, 400]).toContain(response.status);
+      }
+    });
+
+    it('should handle malformed JSON payloads', async () => {
+      const malformedPayloads = [
+        '{"username":"test",}', // Trailing comma
+        '{username:"test"}', // Unquoted key
+        '{"username":"test""email":"test@example.com"}', // Missing comma
+        '[{"username":"test"}]', // Array instead of object
+        'not-json-at-all',
+        '\\x00\\x01\\x02'
+      ];
+
+      for (const payload of malformedPayloads) {
+        const response = await request(app)
+          .post('/api/auth/register')
+          .set('Content-Type', 'application/json')
+          .send(payload);
+
+        // Should handle malformed JSON gracefully
+        expect([400, 422]).toContain(response.status);
+      }
+    });
+  });
+
+  describe('HTTP Method Override Attacks', () => {
+    it('should not allow method override via headers', async () => {
+      // Try to override POST to DELETE via headers
+      const response = await request(app)
+        .post('/api/auth/register')
+        .set('X-HTTP-Method-Override', 'DELETE')
+        .send({
+          username: 'testuser',
+          email: 'test@example.com',
+          password: 'SecurePass123!'
+        });
+
+      // Should still be treated as POST
+      expect([200, 201, 400]).toContain(response.status);
+    });
+  });
+
+  describe('Timing Attack Prevention', () => {
+    it('should have consistent response times for invalid users', async () => {
+      // Create a real user for comparison
+      await UserModel.create({
+        username: 'realuser',
+        email: 'real@example.com',
+        password: await hashPassword('SecurePass123!')
+      });
+
+      const timings: number[] = [];
+
+      // Test with existing user (wrong password)
+      const start1 = Date.now();
+      await request(app)
+        .post('/api/auth/login')
+        .send({
+          email: 'real@example.com',
+          password: 'wrongpassword'
+        });
+      timings.push(Date.now() - start1);
+
+      // Test with non-existing user
+      const start2 = Date.now();
+      await request(app)
+        .post('/api/auth/login')
+        .send({
+          email: 'nonexistent@example.com',
+          password: 'wrongpassword'
+        });
+      timings.push(Date.now() - start2);
+
+      // Timing difference should be minimal (within reasonable bounds)
+      const timingDifference = Math.abs(timings[0] - timings[1]);
+      expect(timingDifference).toBeLessThan(1000); // Less than 1 second difference
+    });
+  });
+
+  describe('Header Injection Tests', () => {
+    it('should prevent CRLF injection in headers', async () => {
+      const crlfPayloads = [
+        'test\\r\
+X-Injected: true',
+        'test\
+X-Injected: true',
+        'test\\r\
+\\r\
+<script>alert("XSS")</script>'
+      ];
+
+      for (const payload of crlfPayloads) {
+        const response = await request(app)
+          .post('/api/auth/login')
+          .set('User-Agent', payload)
+          .send({
+            email: 'test@example.com',
+            password: 'password'
+          });
+
+        // Should not contain injected headers
+        expect(response.headers).not.toHaveProperty('x-injected');
+      }
+    });
+  });
+
+  describe('Business Logic Tests', () => {
+    it('should not allow registration with existing email in different case', async () => {
+      // Register with lowercase email
+      await request(app)
+        .post('/api/auth/register')
+        .send({
+          username: 'testuser1',
+          email: 'test@example.com',
+          password: 'SecurePass123!'
+        });
+
+      // Try to register with uppercase email
+      const response = await request(app)
+        .post('/api/auth/register')
+        .send({
+          username: 'testuser2',
+          email: 'TEST@EXAMPLE.COM',
+          password: 'SecurePass123!'
+        });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should not allow empty or whitespace-only passwords', async () => {
+      const invalidPasswords = [
+        '',
+        ' ',
+        '\\t',
+        '\
+',
+        '        ', // Multiple spaces
+        '\\t\
+\\r ' // Mixed whitespace
+      ];
+
+      for (const password of invalidPasswords) {
+        const response = await request(app)
+          .post('/api/auth/register')
+          .send({
+            username: 'testuser',
+            email: 'test@example.com',
+            password: password
+          });
+
+        expect(response.status).toBe(400);
+      }
+    });
+  });
+});

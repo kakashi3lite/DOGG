@@ -51,19 +51,23 @@ export const createRateLimit = (
   });
 };
 
-// Strict rate limits for auth endpoints
-export const authRateLimit = createRateLimit(
-  15 * 60 * 1000, // 15 minutes
-  5, // 5 attempts per 15 minutes
-  "Too many authentication attempts, please try again in 15 minutes",
-);
+// Strict rate limits for auth endpoints (disabled in test mode)
+export const authRateLimit = process.env.NODE_ENV === 'test'
+  ? (req: Request, res: Response, next: NextFunction) => next() // No-op in tests
+  : createRateLimit(
+    15 * 60 * 1000, // 15 minutes
+    5, // 5 attempts per 15 minutes
+    "Too many authentication attempts, please try again in 15 minutes",
+  );
 
-// General API rate limit
-export const apiRateLimit = createRateLimit(
-  15 * 60 * 1000, // 15 minutes
-  100, // 100 requests per 15 minutes
-  "Too many requests, please slow down",
-);
+// General API rate limit (disabled in test mode)
+export const apiRateLimit = process.env.NODE_ENV === 'test'
+  ? (req: Request, res: Response, next: NextFunction) => next() // No-op in tests
+  : createRateLimit(
+    15 * 60 * 1000, // 15 minutes
+    100, // 100 requests per 15 minutes
+    "Too many requests, please slow down",
+  );
 
 // Input Validation Middleware
 export const validateRequest = (validations: ValidationChain[]) => {

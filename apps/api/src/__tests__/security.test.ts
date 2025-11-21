@@ -1,1 +1,262 @@
-import request from 'supertest';\nimport express from 'express';\nimport {\n  createRateLimit,\n  validateSchema,\n  hashPassword,\n  verifyPassword,\n  securityHeaders,\n  logRequests\n} from '../middleware/security';\nimport { z } from 'zod';\n\n// Create test app\nconst app = express();\napp.use(express.json());\napp.use(securityHeaders);\napp.use(logRequests);\n\n// Test schema\nconst testSchema = z.object({\n  username: z.string().min(3).max(20),\n  email: z.string().email()\n});\n\n// Test routes\napp.post('/test-validation', validateSchema(testSchema), (req, res) => {\n  res.json({ success: true, data: req.body });\n});\n\napp.get('/test-rate-limit', createRateLimit(1000, 2), (req, res) => {\n  res.json({ success: true });\n});\n\napp.get('/test-headers', (req, res) => {\n  res.json({ success: true });\n});\n\ndescribe('Security Middleware', () => {\n  describe('Input Validation', () => {\n    it('should accept valid input', async () => {\n      const validData = {\n        username: 'testuser',\n        email: 'test@example.com'\n      };\n\n      const response = await request(app)\n        .post('/test-validation')\n        .send(validData)\n        .expect(200);\n\n      expect(response.body).toEqual({\n        success: true,\n        data: validData\n      });\n    });\n\n    it('should reject invalid email', async () => {\n      const invalidData = {\n        username: 'testuser',\n        email: 'invalid-email'\n      };\n\n      const response = await request(app)\n        .post('/test-validation')\n        .send(invalidData)\n        .expect(400);\n\n      expect(response.body).toHaveProperty('error', 'Invalid input data');\n      expect(response.body).toHaveProperty('details');\n    });\n\n    it('should reject short username', async () => {\n      const invalidData = {\n        username: 'ab',\n        email: 'test@example.com'\n      };\n\n      const response = await request(app)\n        .post('/test-validation')\n        .send(invalidData)\n        .expect(400);\n\n      expect(response.body).toHaveProperty('error', 'Invalid input data');\n    });\n\n    it('should reject missing required fields', async () => {\n      const invalidData = {\n        username: 'testuser'\n        // Missing email\n      };\n\n      const response = await request(app)\n        .post('/test-validation')\n        .send(invalidData)\n        .expect(400);\n\n      expect(response.body).toHaveProperty('error', 'Invalid input data');\n    });\n\n    it('should reject extra fields not in schema', async () => {\n      const invalidData = {\n        username: 'testuser',\n        email: 'test@example.com',\n        extraField: 'should be rejected'\n      };\n\n      const response = await request(app)\n        .post('/test-validation')\n        .send(invalidData)\n        .expect(200);\n\n      // Extra fields should be stripped\n      expect(response.body.data).not.toHaveProperty('extraField');\n    });\n  });\n\n  describe('Rate Limiting', () => {\n    it('should allow requests within limit', async () => {\n      const response1 = await request(app)\n        .get('/test-rate-limit')\n        .expect(200);\n\n      const response2 = await request(app)\n        .get('/test-rate-limit')\n        .expect(200);\n\n      expect(response1.body).toEqual({ success: true });\n      expect(response2.body).toEqual({ success: true });\n    });\n\n    it('should block requests exceeding limit', async () => {\n      // Make requests up to the limit\n      await request(app).get('/test-rate-limit');\n      await request(app).get('/test-rate-limit');\n      \n      // This should be rate limited\n      const response = await request(app)\n        .get('/test-rate-limit')\n        .expect(429);\n\n      expect(response.body).toHaveProperty('error');\n    }, 10000);\n  });\n\n  describe('Security Headers', () => {\n    it('should set security headers', async () => {\n      const response = await request(app)\n        .get('/test-headers')\n        .expect(200);\n\n      // Check for security headers\n      expect(response.headers).toHaveProperty('content-security-policy');\n      expect(response.headers).toHaveProperty('x-content-type-options', 'nosniff');\n      expect(response.headers).toHaveProperty('x-frame-options', 'DENY');\n      expect(response.headers).toHaveProperty('x-xss-protection', '1; mode=block');\n      expect(response.headers).toHaveProperty('referrer-policy', 'strict-origin-when-cross-origin');\n      expect(response.headers).toHaveProperty('strict-transport-security');\n    });\n\n    it('should set CSP header with correct directives', async () => {\n      const response = await request(app)\n        .get('/test-headers')\n        .expect(200);\n\n      const csp = response.headers['content-security-policy'];\n      expect(csp).toContain(\"default-src 'self'\");\n      expect(csp).toContain(\"frame-ancestors 'none'\");\n      expect(csp).toContain(\"script-src 'self'\");\n    });\n  });\n\n  describe('Password Security', () => {\n    it('should hash passwords securely', async () => {\n      const password = 'SecurePass123!';\n      const hash = await hashPassword(password);\n\n      // Hash should be different from original password\n      expect(hash).not.toBe(password);\n      \n      // Hash should start with bcrypt prefix\n      expect(hash).toMatch(/^\\$2[aby]\\$/);\n      \n      // Hash should be reasonably long\n      expect(hash.length).toBeGreaterThan(50);\n    });\n\n    it('should verify passwords correctly', async () => {\n      const password = 'SecurePass123!';\n      const hash = await hashPassword(password);\n\n      // Correct password should verify\n      const isValid = await verifyPassword(password, hash);\n      expect(isValid).toBe(true);\n\n      // Incorrect password should not verify\n      const isInvalid = await verifyPassword('wrongpassword', hash);\n      expect(isInvalid).toBe(false);\n    });\n\n    it('should use sufficient salt rounds', async () => {\n      const password = 'SecurePass123!';\n      const start = Date.now();\n      await hashPassword(password);\n      const duration = Date.now() - start;\n\n      // Hashing should take reasonable time (indicating sufficient rounds)\n      expect(duration).toBeGreaterThan(50); // At least 50ms\n    });\n\n    it('should produce different hashes for same password', async () => {\n      const password = 'SecurePass123!';\n      const hash1 = await hashPassword(password);\n      const hash2 = await hashPassword(password);\n\n      // Different salts should produce different hashes\n      expect(hash1).not.toBe(hash2);\n      \n      // But both should verify correctly\n      expect(await verifyPassword(password, hash1)).toBe(true);\n      expect(await verifyPassword(password, hash2)).toBe(true);\n    });\n  });\n\n  describe('Request Logging', () => {\n    it('should log requests without exposing sensitive data', async () => {\n      // This is more of an integration test\n      // In a real scenario, you'd mock the logger and verify calls\n      const response = await request(app)\n        .get('/test-headers')\n        .expect(200);\n\n      expect(response.body).toEqual({ success: true });\n    });\n  });\n\n  describe('Error Handling', () => {\n    it('should handle malformed JSON gracefully', async () => {\n      const response = await request(app)\n        .post('/test-validation')\n        .set('Content-Type', 'application/json')\n        .send('{ invalid json }')\n        .expect(400);\n\n      // Express should handle malformed JSON\n      expect(response.body).toBeDefined();\n    });\n\n    it('should handle oversized payloads', async () => {\n      const largePayload = {\n        username: 'a'.repeat(1000000), // Very large field\n        email: 'test@example.com'\n      };\n\n      const response = await request(app)\n        .post('/test-validation')\n        .send(largePayload);\n\n      // Should either accept (if under limit) or reject appropriately\n      expect([200, 400, 413]).toContain(response.status);\n    });\n  });\n});
+import request from 'supertest';
+import express from 'express';
+import {
+  createRateLimit,
+  validateSchema,
+  hashPassword,
+  verifyPassword,
+  securityHeaders,
+  logRequests
+} from '../middleware/security';
+import { z } from 'zod';
+
+// Create test app
+const app = express();
+app.use(express.json());
+app.use(securityHeaders);
+app.use(logRequests);
+
+// Test schema
+const testSchema = z.object({
+  username: z.string().min(3).max(20),
+  email: z.string().email()
+});
+
+// Test routes
+app.post('/test-validation', validateSchema(testSchema), (req, res) => {
+  res.json({ success: true, data: req.body });
+});
+
+app.get('/test-rate-limit', createRateLimit(1000, 2), (req, res) => {
+  res.json({ success: true });
+});
+
+app.get('/test-headers', (req, res) => {
+  res.json({ success: true });
+});
+
+describe('Security Middleware', () => {
+  describe('Input Validation', () => {
+    it('should accept valid input', async () => {
+      const validData = {
+        username: 'testuser',
+        email: 'test@example.com'
+      };
+
+      const response = await request(app)
+        .post('/test-validation')
+        .send(validData)
+        .expect(200);
+
+      expect(response.body).toEqual({
+        success: true,
+        data: validData
+      });
+    });
+
+    it('should reject invalid email', async () => {
+      const invalidData = {
+        username: 'testuser',
+        email: 'invalid-email'
+      };
+
+      const response = await request(app)
+        .post('/test-validation')
+        .send(invalidData)
+        .expect(400);
+
+      expect(response.body).toHaveProperty('error', 'Invalid input data');
+      expect(response.body).toHaveProperty('details');
+    });
+
+    it('should reject short username', async () => {
+      const invalidData = {
+        username: 'ab',
+        email: 'test@example.com'
+      };
+
+      const response = await request(app)
+        .post('/test-validation')
+        .send(invalidData)
+        .expect(400);
+
+      expect(response.body).toHaveProperty('error', 'Invalid input data');
+    });
+
+    it('should reject missing required fields', async () => {
+      const invalidData = {
+        username: 'testuser'
+        // Missing email
+      };
+
+      const response = await request(app)
+        .post('/test-validation')
+        .send(invalidData)
+        .expect(400);
+
+      expect(response.body).toHaveProperty('error', 'Invalid input data');
+    });
+
+    it('should reject extra fields not in schema', async () => {
+      const invalidData = {
+        username: 'testuser',
+        email: 'test@example.com',
+        extraField: 'should be rejected'
+      };
+
+      const response = await request(app)
+        .post('/test-validation')
+        .send(invalidData)
+        .expect(200);
+
+      // Extra fields should be stripped
+      expect(response.body.data).not.toHaveProperty('extraField');
+    });
+  });
+
+  describe('Rate Limiting', () => {
+    it('should allow requests within limit', async () => {
+      const response1 = await request(app)
+        .get('/test-rate-limit')
+        .expect(200);
+
+      const response2 = await request(app)
+        .get('/test-rate-limit')
+        .expect(200);
+
+      expect(response1.body).toEqual({ success: true });
+      expect(response2.body).toEqual({ success: true });
+    });
+
+    it('should block requests exceeding limit', async () => {
+      // Make requests up to the limit
+      await request(app).get('/test-rate-limit');
+      await request(app).get('/test-rate-limit');
+      
+      // This should be rate limited
+      const response = await request(app)
+        .get('/test-rate-limit')
+        .expect(429);
+
+      expect(response.body).toHaveProperty('error');
+    }, 10000);
+  });
+
+  describe('Security Headers', () => {
+    it('should set security headers', async () => {
+      const response = await request(app)
+        .get('/test-headers')
+        .expect(200);
+
+      // Check for security headers
+      expect(response.headers).toHaveProperty('content-security-policy');
+      expect(response.headers).toHaveProperty('x-content-type-options', 'nosniff');
+      expect(response.headers).toHaveProperty('x-frame-options', 'DENY');
+      expect(response.headers).toHaveProperty('x-xss-protection', '1; mode=block');
+      expect(response.headers).toHaveProperty('referrer-policy', 'strict-origin-when-cross-origin');
+      expect(response.headers).toHaveProperty('strict-transport-security');
+    });
+
+    it('should set CSP header with correct directives', async () => {
+      const response = await request(app)
+        .get('/test-headers')
+        .expect(200);
+
+      const csp = response.headers['content-security-policy'];
+      expect(csp).toContain("default-src 'self'");
+      expect(csp).toContain("frame-ancestors 'none'");
+      expect(csp).toContain("script-src 'self'");
+    });
+  });
+
+  describe('Password Security', () => {
+    it('should hash passwords securely', async () => {
+      const password = 'SecurePass123!';
+      const hash = await hashPassword(password);
+
+      // Hash should be different from original password
+      expect(hash).not.toBe(password);
+      
+      // Hash should start with bcrypt prefix
+      expect(hash).toMatch(/^\\$2[aby]\\$/);
+      
+      // Hash should be reasonably long
+      expect(hash.length).toBeGreaterThan(50);
+    });
+
+    it('should verify passwords correctly', async () => {
+      const password = 'SecurePass123!';
+      const hash = await hashPassword(password);
+
+      // Correct password should verify
+      const isValid = await verifyPassword(password, hash);
+      expect(isValid).toBe(true);
+
+      // Incorrect password should not verify
+      const isInvalid = await verifyPassword('wrongpassword', hash);
+      expect(isInvalid).toBe(false);
+    });
+
+    it('should use sufficient salt rounds', async () => {
+      const password = 'SecurePass123!';
+      const start = Date.now();
+      await hashPassword(password);
+      const duration = Date.now() - start;
+
+      // Hashing should take reasonable time (indicating sufficient rounds)
+      expect(duration).toBeGreaterThan(50); // At least 50ms
+    });
+
+    it('should produce different hashes for same password', async () => {
+      const password = 'SecurePass123!';
+      const hash1 = await hashPassword(password);
+      const hash2 = await hashPassword(password);
+
+      // Different salts should produce different hashes
+      expect(hash1).not.toBe(hash2);
+      
+      // But both should verify correctly
+      expect(await verifyPassword(password, hash1)).toBe(true);
+      expect(await verifyPassword(password, hash2)).toBe(true);
+    });
+  });
+
+  describe('Request Logging', () => {
+    it('should log requests without exposing sensitive data', async () => {
+      // This is more of an integration test
+      // In a real scenario, you'd mock the logger and verify calls
+      const response = await request(app)
+        .get('/test-headers')
+        .expect(200);
+
+      expect(response.body).toEqual({ success: true });
+    });
+  });
+
+  describe('Error Handling', () => {
+    it('should handle malformed JSON gracefully', async () => {
+      const response = await request(app)
+        .post('/test-validation')
+        .set('Content-Type', 'application/json')
+        .send('{ invalid json }')
+        .expect(400);
+
+      // Express should handle malformed JSON
+      expect(response.body).toBeDefined();
+    });
+
+    it('should handle oversized payloads', async () => {
+      const largePayload = {
+        username: 'a'.repeat(1000000), // Very large field
+        email: 'test@example.com'
+      };
+
+      const response = await request(app)
+        .post('/test-validation')
+        .send(largePayload);
+
+      // Should either accept (if under limit) or reject appropriately
+      expect([200, 400, 413]).toContain(response.status);
+    });
+  });
+});
